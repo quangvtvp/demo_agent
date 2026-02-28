@@ -55,6 +55,21 @@ class UserPreferences {
     );
   }
 
+  /// Tạo cache key duy nhất từ các thuộc tính preferences.
+  ///
+  /// Dùng để làm key lưu/truy xuất cache trong Hive.
+  String get cacheKey {
+    final parts = [
+      originLocation,
+      durationDays.toString(),
+      budget.amount.toString(),
+      budget.currency,
+      travelStyle.join('-'),
+      departureDate,
+    ];
+    return parts.join('|').hashCode.toRadixString(36);
+  }
+
   Map<String, dynamic> toJson() => {
     'originLocation': originLocation,
     'durationDays': durationDays,

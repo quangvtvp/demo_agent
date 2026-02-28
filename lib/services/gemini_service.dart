@@ -1,28 +1,40 @@
 import 'dart:convert';
+import 'dart:developer';
 
 import 'package:google_generative_ai/google_generative_ai.dart';
 
 import '../models/destination_detail_response.dart';
 import '../models/travel_suggestions_response.dart';
 import '../models/user_preferences.dart';
+import 'cache_service.dart';
 
 /// Service gọi Gemini API để sinh gợi ý du lịch và lịch trình chi tiết.
+///
+/// Hỗ trợ 2 chế độ:
+/// - **realtime** (`realtime = true`): luôn gọi API, cache kết quả mới.
+/// - **cached** (`realtime = false`, mặc định): ưu tiên đọc cache,
+///   chỉ gọi API nếu cache trống/hết hạn.
 ///
 /// Tất cả nội dung trả về đều bằng tiếng Việt.
 /// Image URLs được yêu cầu Gemini trả về dạng link Unsplash thực tế.
 class GeminiService {
   final GenerativeModel _model;
+  final CacheService _cacheService;
   final int defaultLimit;
 
-  GeminiService({required String apiKey, this.defaultLimit = 10})
-    : _model = GenerativeModel(
-        model: 'gemini-3-flash-preview',
-        apiKey: apiKey,
-        generationConfig: GenerationConfig(
-          responseMimeType: 'application/json',
-          temperature: 0.7,
-        ),
-      );
+  GeminiService({
+    required String apiKey,
+    required CacheService cacheService,
+    this.defaultLimit = 10,
+  }) : _model = GenerativeModel(
+         model: 'gemini-3-flash-preview',
+         apiKey: apiKey,
+         generationConfig: GenerationConfig(
+           responseMimeType: 'application/json',
+           temperature: 0.7,
+         ),
+       ),
+       _cacheService = cacheService;
 
   // ---------------------------------------------------------------------------
   // 1) Gợi ý điểm đến
@@ -31,12 +43,28 @@ class GeminiService {
   /// Trả về danh sách gợi ý điểm đến du lịch phù hợp với [preferences].
   ///
   /// [limit] – số lượng kết quả tối đa (mặc định [defaultLimit] = 10).
+  /// [realtime] – `true` để luôn gọi API mới, `false` để ưu tiên cache.
   Future<TravelSuggestionsResponse> getTravelSuggestions(
     UserPreferences preferences, {
     int? limit,
+    bool realtime = false,
   }) async {
     final effectiveLimit = limit ?? defaultLimit;
+    final cacheKey = '${preferences.cacheKey}_$effectiveLimit';
 
+    // ── Cached mode: kiểm tra cache trước ──
+    if (!realtime) {
+      final cached = _cacheService.getCachedSuggestions(cacheKey);
+      if (cached != null) {
+        log('[GeminiService] ✅ Suggestions loaded from CACHE');
+        return cached;
+      }
+      log('[GeminiService] Cache miss — fallback to API');
+    } else {
+      log('[GeminiService] 🔄 Realtime mode — calling API');
+    }
+
+    // ── Gọi API ──
     final prompt = _buildSuggestionsPrompt(preferences, effectiveLimit);
     final response = await _model.generateContent([Content.text(prompt)]);
 
@@ -46,7 +74,13 @@ class GeminiService {
     }
 
     final jsonMap = json.decode(jsonText) as Map<String, dynamic>;
-    return TravelSuggestionsResponse.fromJson(jsonMap);
+    final result = TravelSuggestionsResponse.fromJson(jsonMap);
+
+    // ── Cache kết quả ──
+    await _cacheService.cacheSuggestions(cacheKey, result);
+    log('[GeminiService] 💾 Suggestions cached — key: $cacheKey');
+
+    return result;
   }
 
   String _buildSuggestionsPrompt(UserPreferences prefs, int limit) {
@@ -99,10 +133,28 @@ Trả về JSON theo đúng schema sau (KHÔNG thêm gì ngoài JSON):
   // ---------------------------------------------------------------------------
 
   /// Trả về thông tin chi tiết và lịch trình day-by-day cho [destinationId].
+  ///
+  /// [realtime] – `true` để luôn gọi API mới, `false` để ưu tiên cache.
   Future<DestinationDetailResponse> getDestinationDetail(
     String destinationId,
-    UserPreferences preferences,
-  ) async {
+    UserPreferences preferences, {
+    bool realtime = false,
+  }) async {
+    final cacheKey = '${destinationId}_${preferences.cacheKey}';
+
+    // ── Cached mode: kiểm tra cache trước ──
+    if (!realtime) {
+      final cached = _cacheService.getCachedDetail(cacheKey);
+      if (cached != null) {
+        log('[GeminiService] ✅ Detail loaded from CACHE');
+        return cached;
+      }
+      log('[GeminiService] Cache miss — fallback to API');
+    } else {
+      log('[GeminiService] 🔄 Realtime mode — calling API');
+    }
+
+    // ── Gọi API ──
     final prompt = _buildDetailPrompt(destinationId, preferences);
     final response = await _model.generateContent([Content.text(prompt)]);
 
@@ -112,7 +164,13 @@ Trả về JSON theo đúng schema sau (KHÔNG thêm gì ngoài JSON):
     }
 
     final jsonMap = json.decode(jsonText) as Map<String, dynamic>;
-    return DestinationDetailResponse.fromJson(jsonMap);
+    final result = DestinationDetailResponse.fromJson(jsonMap);
+
+    // ── Cache kết quả ──
+    await _cacheService.cacheDetail(cacheKey, result);
+    log('[GeminiService] 💾 Detail cached — key: $cacheKey');
+
+    return result;
   }
 
   String _buildDetailPrompt(String destinationId, UserPreferences prefs) {

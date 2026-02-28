@@ -2,25 +2,38 @@ import 'dart:developer';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 
 import 'models/user_preferences.dart';
+import 'services/cache_service.dart';
 import 'services/gemini_service.dart';
 
 late final GeminiService geminiService;
+late final CacheService cacheService;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await dotenv.load(fileName: '.env');
 
-  geminiService = GeminiService(apiKey: dotenv.env['GEMINI_API_KEY'] ?? '');
+  // ── Khởi tạo Hive (hỗ trợ cả mobile & web) ──
+  await Hive.initFlutter();
 
-  await _testGeminiService();
+  // ── Khởi tạo services ──
+  cacheService = CacheService();
+  await cacheService.init();
+
+  geminiService = GeminiService(
+    apiKey: dotenv.env['GEMINI_API_KEY'] ?? '',
+    cacheService: cacheService,
+  );
+
+  await _testGeminiServiceWithCache();
 
   runApp(const MainApp());
 }
 
-/// Test gọi Gemini service và in kết quả ra console.
-Future<void> _testGeminiService() async {
+/// Test gọi Gemini service với cache/realtime mode.
+Future<void> _testGeminiServiceWithCache() async {
   final preferences = UserPreferences(
     originLocation: 'Hà Nội, Việt Nam',
     durationDays: 3,
@@ -33,74 +46,51 @@ Future<void> _testGeminiService() async {
     departureDate: '2025-03-15',
   );
 
-  // ── Test 1: Gợi ý điểm đến (limit = 3 để test nhanh) ──────────────
+  // ── Test 1: Gọi REALTIME (luôn gọi API) ────────────────────────────
   log('═══════════════════════════════════════════');
-  log('>>> [TEST] getTravelSuggestions (limit=3)');
+  log('>>> [TEST 1] getTravelSuggestions — REALTIME (limit=3)');
   log('═══════════════════════════════════════════');
   try {
+    final stopwatch = Stopwatch()..start();
     final suggestions = await geminiService.getTravelSuggestions(
       preferences,
       limit: 3,
+      realtime: true,
     );
+    stopwatch.stop();
 
+    log('⏱ Thời gian: ${stopwatch.elapsedMilliseconds}ms');
     log('contextSummary: ${suggestions.contextSummary}');
-    log('generatedAt: ${suggestions.generatedAt}');
-    log('Số gợi ý nhận được: ${suggestions.suggestions.length}');
-    log('───────────────────────────────────────────');
-
+    log('Số gợi ý: ${suggestions.suggestions.length}');
     for (int i = 0; i < suggestions.suggestions.length; i++) {
       final s = suggestions.suggestions[i];
-      log('[${i + 1}] ${s.name}, ${s.country}');
       log(
-        '    matchScore : ${s.matchScore}%${s.isTopPick ? ' 🎯 Top Pick' : ''}',
+        '[${i + 1}] ${s.name}, ${s.country} '
+        '(matchScore: ${s.matchScore}%)',
       );
-      log('    budget     : ${s.estimatedBudget.displayText}');
-      log('    aiInsight  : ${s.aiInsight}');
-      log('    tags       : ${s.tags.join(', ')}');
-      log('    imageUrl   : ${s.imageUrl}');
-      log('───────────────────────────────────────────');
     }
 
-    // ── Test 2: Chi tiết điểm đến đầu tiên ─────────────────────────
-    if (suggestions.suggestions.isNotEmpty) {
-      final firstId = suggestions.suggestions.first.destinationId;
-      log('');
-      log('>>> [TEST] getDestinationDetail (id=$firstId)');
-      log('═══════════════════════════════════════════');
+    // ── Test 2: Gọi CACHED (đọc từ cache) ───────────────────────────
+    log('');
+    log('═══════════════════════════════════════════');
+    log('>>> [TEST 2] getTravelSuggestions — CACHED (same preferences)');
+    log('═══════════════════════════════════════════');
+    final stopwatch2 = Stopwatch()..start();
+    final cachedSuggestions = await geminiService.getTravelSuggestions(
+      preferences,
+      limit: 3,
+      realtime: false, // <— sẽ đọc từ cache
+    );
+    stopwatch2.stop();
 
-      final detail = await geminiService.getDestinationDetail(
-        firstId,
-        preferences,
-      );
-
-      log('Điểm đến    : ${detail.destination.fullDisplayName}');
-      log('Thời tiết   : ${detail.weather.displayText}');
-      log('Ngày đi     : ${detail.travelDates.displayText}');
-      log('Ngân sách   : ${detail.budget.total.displayText}');
-      log('aiInsight   : ${detail.aiInsight}');
-      log('');
-      log('── Budget Breakdown ──────────────────────');
-      for (final item in detail.budget.breakdown) {
-        log('  ${item.label}: ${item.displayText}');
-      }
-      log('');
-      log('── Lịch trình ────────────────────────────');
-      for (final day in detail.itinerary) {
-        log('  ${day.dayLabel}');
-        for (final act in day.activities) {
-          log(
-            '    ${act.time} | ${act.title} (${act.estimatedDurationMinutes} phút)',
-          );
-        }
-      }
-      log('');
-      log('── Highlights ────────────────────────────');
-      for (final h in detail.highlights) {
-        log('  • ${h.title}: ${h.description}');
-      }
-      log('═══════════════════════════════════════════');
-      log('[TEST] Hoàn thành ✅');
+    log('⏱ Thời gian: ${stopwatch2.elapsedMilliseconds}ms');
+    log('Số gợi ý: ${cachedSuggestions.suggestions.length}');
+    for (int i = 0; i < cachedSuggestions.suggestions.length; i++) {
+      final s = cachedSuggestions.suggestions[i];
+      log('[${i + 1}] ${s.name}, ${s.country}');
     }
+    log('');
+    log('[TEST] Hoàn thành ✅ — Cache hoạt động!');
   } catch (e, stack) {
     log('[TEST] Lỗi: $e', error: e, stackTrace: stack);
   }
